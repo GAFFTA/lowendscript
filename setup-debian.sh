@@ -83,14 +83,27 @@ function install_dropbear {
     touch /etc/ssh/sshd_not_to_be_run
     invoke-rc.d ssh stop
 
+    if [ -z $SSH_PORT ];then
+        SSH_PORT=22
+        print_info "Dropbear port set to 22"
+    else
+        if [ $SSH_PORT -le 65535 ]; then
+            print_info "Dropbear port set to $SSH_PORT"
+        else
+            SSH_PORT=22
+            print_warn "Dropbear port changed to 22"
+        fi
+    fi
     # Enable dropbear to start. We are going to use xinetd as it is just
     # easier to configure and might be used for other things.
     cat > /etc/xinetd.d/dropbear <<END
-service ssh
+service dropbear
 {
     socket_type     = stream
     only_from       = 0.0.0.0
     wait            = no
+    port            = $SSH_PORT
+    type            = unlisted
     user            = root
     protocol        = tcp
     server          = /usr/sbin/dropbear
@@ -375,6 +388,7 @@ function update_upgrade {
 ########################################################################
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin
 
+[ -r ./setup-debian.conf ] && . ./setup-debian.conf
 check_sanity
 case "$1" in
 exim4)
