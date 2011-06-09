@@ -104,6 +104,7 @@ service dropbear
     wait            = no
     port            = $SSH_PORT
     type            = unlisted
+    flags			= ipv4
     user            = root
     protocol        = tcp
     server          = /usr/sbin/dropbear
@@ -253,6 +254,178 @@ END
     invoke-rc.d php-cgi start
 }
 
+function install_iptables {
+
+    check_install iptables
+
+    if [ -z "$1" ]
+    then
+        die "Usage: `basename $0` iptables <ssh-port-#>"
+    fi
+
+    # Create startup rules
+    cat > /etc/init.d/iptables <<END
+#! /bin/sh
+
+#This is an Ubuntu adapted iptables script from gentoo
+#(http://www.gentoo.org) which was originally distributed
+#under the terms of the GNU General Public License v2
+#and was Copyrighted 1999-2004 by the Gentoo Foundation
+#
+#This adapted version was intended for and ad-hoc personal
+#situation and as such no warranty is provided.
+
+### BEGIN INIT INFO
+# Provides:          iptables
+# Required-Start:    \$local_fs \$remote_fs \$network \$syslog
+# Required-Stop:     \$local_fs \$remote_fs \$network \$syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start the iptables firewall
+### END INIT INFO
+
+. /lib/lsb/init-functions
+
+
+IPTABLES_SAVE="/etc/default/iptables-rules"
+SAVE_RESTORE_OPTIONS="-c"
+
+
+checkrules() {
+    if [ ! -f \${IPTABLES_SAVE} ]
+    then
+        echo "Not starting iptables. First create some rules then run"
+        echo "\"/etc/init.d/iptables save\""
+        return 1
+    fi
+}
+
+save() {
+    /sbin/iptables-save \${SAVE_RESTORE_OPTIONS} > \${IPTABLES_SAVE}
+    return \$?
+}
+
+start(){
+    checkrules || return 1
+    /sbin/iptables-restore \${SAVE_RESTORE_OPTIONS} < \${IPTABLES_SAVE}
+    return \$?
+}
+
+
+case "\$1" in
+    save)
+        echo -n "Saving iptables state..."
+        save
+        if [ \$? -eq 0 ] ; then
+            echo " ok"
+        else
+            echo " error !"
+        fi
+    ;;
+
+    start)
+        log_begin_msg "Loading iptables state and starting firewall..."
+        start
+        log_end_msg \$?
+    ;;
+    stop)
+        log_begin_msg "Stopping firewall..."
+        for a in \`cat /proc/net/ip_tables_names\`; do
+            /sbin/iptables -F -t \$a
+            /sbin/iptables -X -t \$a
+
+            if [ \$a == nat ]; then
+                /sbin/iptables -t nat -P PREROUTING ACCEPT
+                /sbin/iptables -t nat -P POSTROUTING ACCEPT
+                /sbin/iptables -t nat -P OUTPUT ACCEPT
+            elif [ \$a == mangle ]; then
+                /sbin/iptables -t mangle -P PREROUTING ACCEPT
+                /sbin/iptables -t mangle -P INPUT ACCEPT
+                /sbin/iptables -t mangle -P FORWARD ACCEPT
+                /sbin/iptables -t mangle -P OUTPUT ACCEPT
+                /sbin/iptables -t mangle -P POSTROUTING ACCEPT
+            elif [ \$a == filter ]; then
+                /sbin/iptables -t filter -P INPUT ACCEPT
+                /sbin/iptables -t filter -P FORWARD ACCEPT
+                /sbin/iptables -t filter -P OUTPUT ACCEPT
+            fi
+        done
+        log_end_msg 0
+    ;;
+
+    restart)
+        log_begin_msg "Restarting firewall..."
+        for a in \`cat /proc/net/ip_tables_names\`; do
+            /sbin/iptables -F -t \$a
+            /sbin/iptables -X -t \$a
+        done;
+        start
+        log_end_msg \$?
+    ;;
+
+    *)
+        echo "Usage: /etc/init.d/iptables {start|stop|restart|save}" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
+END
+    chmod +x /etc/init.d/iptables
+
+    # Flush any existing iptables
+    /sbin/iptables -v -F
+
+    # http://articles.slicehost.com/2010/4/30/ubuntu-lucid-setup-part-1
+
+    #  Allows all loopback (lo0) traffic and drop all traffic to 127/8 that doesn't use lo0
+    /sbin/iptables -v -A INPUT -i lo -j ACCEPT
+    /sbin/iptables -v -A INPUT ! -i lo -d 127.0.0.0/8 -j REJECT
+
+    #  Accepts all established inbound connections
+    /sbin/iptables -v -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+    #  Allows all outbound traffic
+    #  You can modify this to only allow certain traffic
+    /sbin/iptables -v -A OUTPUT -j ACCEPT
+
+    # Allows HTTP and HTTPS connections from anywhere (the normal ports for websites)
+    /sbin/iptables -v -A INPUT -p tcp --dport 80 -j ACCEPT
+    /sbin/iptables -v -A INPUT -p tcp --dport 443 -j ACCEPT
+
+    # IF YOU USE INCOMMING MAIL UN-COMMENT THESE!!!
+
+    # Allows POP (and SSL-POP)
+    #/sbin/iptables -v -A INPUT -p tcp --dport 110 -j ACCEPT
+    #/sbin/iptables -v -A INPUT -p tcp --dport 995 -j ACCEPT
+
+    # SMTP (and SSMTP)
+    #/sbin/iptables -v -A INPUT -p tcp --dport 25 -j ACCEPT
+    #/sbin/iptables -v -A INPUT -p tcp --dport 465 -j ACCEPT
+
+    # IMAP (and IMAPS)
+    #/sbin/iptables -v -A INPUT -p tcp --dport 143 -j ACCEPT
+    #/sbin/iptables -v -A INPUT -p tcp --dport 993 -j ACCEPT
+
+    #  Allows SSH connections (only 3 attempts by an IP every 2 minutes, drop the rest to prevent SSH attacks)
+    /sbin/iptables -v -A INPUT -p tcp -m tcp --dport $1 -m state --state NEW -m recent --set --name DEFAULT --rsource
+    /sbin/iptables -v -A INPUT -p tcp -m tcp --dport $1 -m state --state NEW -m recent --update --seconds 120 --hitcount 3 --name DEFAULT --rsource -j DROP
+    /sbin/iptables -v -A INPUT -p tcp -m state --state NEW --dport $1 -j ACCEPT
+
+    # Allow ping
+    /sbin/iptables -v -A INPUT -p icmp -m icmp --icmp-type 8 -j ACCEPT
+
+    # log iptables denied calls
+    /sbin/iptables -v -A INPUT -m limit --limit 5/min -j LOG --log-prefix "iptables denied: " --log-level 7
+
+    # Reject all other inbound - default deny unless explicitly allowed policy
+    /sbin/iptables -v -A INPUT -j REJECT
+    /sbin/iptables -v -A FORWARD -j REJECT
+
+    /etc/init.d/iptables save
+    update-rc.d iptables defaults
+}
+
 function install_syslogd {
     # We just need a simple vanilla syslogd. Also there is no need to log to
     # so many files (waste of fd). Just dump them into
@@ -380,7 +553,36 @@ function update_upgrade {
     # Run through the apt-get update/upgrade first. This should be done before
     # we try to install any package
     apt-get -q -y update
+	check_install locales
+    dpkg-reconfigure locales
     apt-get -q -y upgrade
+}
+
+function vzquota_fix {
+     if [ -f /etc/init.d/vzquota -a ! -e /etc/insserv/overrides/vzquota ]; then
+cat > /etc/insserv/overrides/vzquota <<END
+### BEGIN INIT INFO
+# Provides: vzquota
+# Required-Start: \$all
+# Required-Stop: \$all
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: Start vzquota at the end of boot
+# Description: This command is used to configure and see disk quota statistics for Containers.
+### END INIT INFO
+END
+        print_info "/etc/insserv/overrides/vzquota created"
+    else
+        print_warn "/etc/insserv/overrides/vzquota not created"
+    fi
+    if [ -f /etc/rc6.d/K00vzreboot ];then
+        rm /etc/rc6.d/K00vzreboot
+        print_info "/etc/rc6.d/K00vzreboot removed"
+    fi
+    if [ -f /etc/rc6.d/S00vzreboot ];then
+        rm /etc/rc6.d/S00vzreboot
+        print_info "/etc/rc6.d/S00vzreboot removed"
+    fi
 }
 
 ########################################################################
@@ -394,6 +596,9 @@ case "$1" in
 exim4)
     install_exim4
     ;;
+iptables)
+    install_iptables $SSH_PORT
+    ;;
 mysql)
     install_mysql
     ;;
@@ -403,9 +608,14 @@ nginx)
 php)
     install_php
     ;;
+vzquota)
+    vzquota_fix
+    ;;
 system)
     remove_unneeded
     update_upgrade
+	check_install tzdata tzdata
+    dpkg-reconfigure tzdata
     install_dash
     install_syslogd
     install_dropbear
@@ -416,7 +626,7 @@ wordpress)
 *)
     echo 'Usage:' `basename $0` '[option]'
     echo 'Available option:'
-    for option in system exim4 mysql nginx php wordpress
+    for option in vzquota system exim4 iptables mysql nginx php wordpress
     do
         echo '  -' $option
     done
