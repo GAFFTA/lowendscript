@@ -255,6 +255,67 @@ END
     invoke-rc.d php-cgi start
 }
 
+function install_cgi {
+    check_install fcgiwrap fcgiwrap
+    cat > /etc/nginx/fcgiwrap.conf <<END
+location ~ (\.cgi$|\.py$|\.sh$|\.pl$) {
+    gzip off;
+    root  /var/www/\$server_name;
+    autoindex on;
+    fastcgi_pass  unix:/var/run/fcgiwrap.socket;
+    include /etc/nginx/fastcgi_params;
+    fastcgi_param  DOCUMENT_ROOT      /var/www/\$server_name;
+    fastcgi_param SCRIPT_FILENAME  /var/www/\$server_name\$fastcgi_script_name;
+}
+END
+}
+
+function install_cgi_domain {
+    if [ -z "$1" ]
+    then
+        die "Usage: `basename $0` cgi_domain <hostname>"
+    fi
+
+    if [ ! -d /var/www ]; then
+        mkdir /var/www
+        chown root:root /var/www
+    fi
+
+    if [ ! -d /var/www/$1 ]; then
+		mkdir /var/www/$1
+		chown root:root /var/www/$1
+        cat > "/var/www/$1/index.sh" <<END
+#!/bin/sh
+echo "Content-type:text/html\r\n"
+echo "<html><head>"
+echo "<title>"$1"</title>"
+echo "<meta name='description' content="$1">"
+echo "<meta name='keywords' content="$1">"
+echo "<meta http-equiv='Content-type' content='text/html;charset=UTF-8'>"
+echo "<meta name='ROBOTS' content='INDEX, FOLLOW'>"
+echo "<h1>It works!</h1>"
+echo "<p>This is the default web page for "$1"</p>"
+echo "<p>The web server software is running but no content has been added, yet.</p>"
+echo "</head><body>"
+echo "</pre></body></html>"
+END
+        chmod +x "/var/www/$1/index.sh"
+    fi
+
+   # Setting up Nginx mapping
+    cat > "/etc/nginx/sites-enabled/$1.conf" <<END
+server {
+    listen 80;
+    listen  [::]:80;
+    server_name $1;
+    include /etc/nginx/fcgiwrap.conf;
+    root   /var/www/$1;
+    index  index.sh;
+}
+END
+    invoke-rc.d nginx reload
+}
+
 function install_iptables {
 
     check_install iptables iptables
@@ -609,6 +670,12 @@ nginx)
 php)
     install_php
     ;;
+cgi)
+    install_cgi
+    ;;
+cgi_domain)
+    install_cgi_domain $2
+    ;;
 vzquota)
     vzquota_fix
     ;;
@@ -628,7 +695,7 @@ wordpress)
 *)
     echo 'Usage:' `basename $0` '[option]'
     echo 'Available option:'
-    for option in vzquota system exim4 iptables mysql nginx php wordpress
+    for option in vzquota system exim4 iptables mysql nginx php cgi cgi_domain wordpress
     do
         echo '  -' $option
     done
