@@ -76,6 +76,7 @@ function install_dash {
 }
 
 function install_dropbear {
+    check_install ssh ssh
     check_install dropbear dropbear
     check_install /usr/sbin/xinetd xinetd
 
@@ -256,7 +257,7 @@ END
 
 function install_iptables {
 
-    check_install iptables
+    check_install iptables iptables
 
     if [ -z "$1" ]
     then
@@ -553,7 +554,7 @@ function update_upgrade {
     # Run through the apt-get update/upgrade first. This should be done before
     # we try to install any package
     apt-get -q -y update
-	check_install locales
+	check_install locales locales
     dpkg-reconfigure locales
     apt-get -q -y upgrade
 }
@@ -619,6 +620,7 @@ system)
     install_dash
     install_syslogd
     install_dropbear
+    passwd
     ;;
 wordpress)
     install_wordpress $2
