@@ -33,10 +33,15 @@ function check_sanity {
         die 'Must be run by root user'
     fi
 
-    if [ ! -f /etc/debian_version ]
+    if [ -f /etc/lsb-release ]
     then
         die "Distribution is not supported"
     fi
+    if [ ! -f /etc/debian_version ]
+    then
+        die "Ubuntu is not supported"
+    fi
+
 }
 
 function die {
@@ -55,6 +60,16 @@ function get_domain_name() {
     esac
     lowest=`expr "$domain" : '.*\.\([a-z][a-z]*\)'`
     [ -z "$lowest" ] && echo "$domain" || echo "$lowest"
+}
+
+function disallow {
+    echo -n "To disallow dubious access press y then [ENTER]: "
+    read -e reply
+    if [ "$reply" = "y" ]; then
+        cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
+    include disallow.conf;
+END
+    fi
 }
 
 function get_password() {
@@ -111,11 +126,10 @@ function install_dropbear {
 service dropbear
 {
     socket_type     = stream
-    only_from       = 0.0.0.0
     wait            = no
     port            = $SSH_PORT
     type            = unlisted
-    flags			= ipv4
+    flags           = $FLAGS
     user            = root
     protocol        = tcp
     server          = /usr/sbin/dropbear
@@ -126,6 +140,22 @@ END
     invoke-rc.d xinetd restart
 }
 
+function install_postfix {
+    check_install mail postfix
+    #sed -i "s/dc_eximconfig_configtype='local'/dc_eximconfig_configtype='internet'/" /etc/exim4/update-exim4.conf.conf
+    #invoke-rc.d postfix restart
+    cat > /etc/aliases <<END
+postmaster:    $EMAIL
+MAILER-DAEMON: $EMAIL
+abuse:         $EMAIL
+spam:          $EMAIL
+hostmaster:    $EMAIL
+root:          $EMAIL
+nobody:        $EMAIL
+mail:          $EMAIL
+END
+    newaliases
+}
 function install_exim4 {
     check_install mail exim4
     if [ -f /etc/exim4/update-exim4.conf.conf ]
@@ -167,17 +197,41 @@ END
 
 function install_nginx {
     check_install nginx nginx
-    
+
     # Need to increase the bucket size for Debian 5.
     cat > /etc/nginx/conf.d/lowendbox.conf <<END
 server_names_hash_bucket_size 64;
 END
-
+    cat > /etc/nginx/nophp.conf <<END
+location ~* \.php\$ {
+access_log /var/log/nginx/disallow.log;
+return 444;
+}
+END
+    cat > /etc/nginx/nocgi.conf <<END
+location ~* \\.(pl|cgi|py|sh|lua)\$ {
+access_log /var/log/nginx/disallow.log;
+return 444;
+}
+END
+    cat > /etc/nginx/disallow.conf <<END
+location / {
+    location ~* (roundcube|webdav|smtp|http\\:|soap|w00tw00t) {
+        access_log /var/log/nginx/disallow.log;
+        return 444;
+    }
+    if (\$http_user_agent ~* "(Morfeus|larbin|ZmEu|Toata|Huawei|talktalk)" ) {
+        access_log /var/log/nginx/disallow.log;
+        return 444;
+    }
+}
+END
+    sed -i "s/worker_processes 4;/worker_processes 1;/" /etc/nginx/nginx.conf
     invoke-rc.d nginx restart
 }
 
 function install_php {
-    check_install php5-fpm php5-fpm php5-cli php5-mysql php5-cgi
+    check_install php5-fpm php5-fpm php5-cli php5-mysql php5-cgi php5-gd php5-curl
     cat > /etc/nginx/fastcgi_php <<END
 location ~ \.php$ {
     include /etc/nginx/fastcgi_params;
@@ -189,6 +243,12 @@ location ~ \.php$ {
     }
 }
 END
+    sed -i "s/pm.max_children = 50/pm.max_children = 3/" /etc/php5/fpm/pool.d/www.conf
+    sed -i "s/pm.start_servers = 5/pm.start_servers = 1/" /etc/php5/fpm/pool.d/www.conf
+    sed -i "s/pm.start_servers = 20/pm.start_servers = 1/" /etc/php5/fpm/pool.d/www.conf
+    sed -i "s/pm.min_spare_servers = 5/pm.min_spare_servers = 1/" /etc/php5/fpm/pool.d/www.conf
+    sed -i "s/pm.max_spare_servers = 35/pm.max_spare_servers = 3/" /etc/php5/fpm/pool.d/www.conf
+    service php5-fpm restart
     if [ -f /etc/init.d/php-cgi ];then
         service php-cgi stop
         update-rc.d php-cgi remove
@@ -201,7 +261,7 @@ END
 function install_cgi {
     check_install fcgiwrap fcgiwrap
     cat > /etc/nginx/fcgiwrap.conf <<END
-location ~ (\.cgi$|\.py$|\.sh$|\.pl$) {
+location ~ (\.cgi|\.py|\.sh|\.pl|\.lua)$ {
     gzip off;
     root  /var/www/\$server_name;
     autoindex on;
@@ -213,7 +273,7 @@ location ~ (\.cgi$|\.py$|\.sh$|\.pl$) {
 END
 }
 
-function install_cgi_domain {
+function install_domain {
     if [ -z "$1" ]
     then
         die "Usage: `basename $0` cgi_domain <hostname>"
@@ -249,9 +309,39 @@ END
     cat > "/etc/nginx/sites-enabled/$1.conf" <<END
 server {
     listen 80;
-    listen  [::]:80;
+END
+    if [ "$FLAGS" = "ipv6" ]; then
+        cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
+    listen [::]:80;
+END
+    fi
+    cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
     server_name $1;
-    include /etc/nginx/fcgiwrap.conf;
+END
+    echo -n "To use php press y then [ENTER]: "
+    read -e reply
+    if [ "$reply" = "y" ]; then
+        cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
+    include fastcgi_php;
+END
+    else
+    cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
+    include nophp.conf;
+END
+    fi
+    echo -n "To use cgi press y then [ENTER]: "
+    read -e reply
+    if [ "$reply" = "y" ]; then
+        cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
+    include fcgiwrap.conf;
+END
+    else
+    cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
+    include nocgi.conf;
+END
+    fi
+    disallow $1
+    cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
     root   /var/www/$1;
     index  index.sh;
 }
@@ -267,7 +357,11 @@ function install_iptables {
     then
         die "Usage: `basename $0` iptables <ssh-port-#>"
     fi
-
+    KERNEL=`uname -r`
+    if [ ! -d /lib/modules/$KERNEL ]; then
+        mkdir /lib/modules/$KERNEL
+        depmod
+    fi
     # Create startup rules
     cat > /etc/init.d/iptables <<END
 #! /bin/sh
@@ -465,7 +559,7 @@ END
    compress
    sharedscripts
    postrotate
-      /etc/init.d/inetutils-syslogd reload >/dev/null
+   /etc/init.d/inetutils-syslogd reload >/dev/null
    endscript
 }
 END
@@ -484,6 +578,9 @@ function install_wordpress {
     mkdir /tmp/wordpress.$$
     wget -O - http://wordpress.org/latest.tar.gz | \
         tar zxf - -C /tmp/wordpress.$$
+    if [ ! -d /var/www ]; then
+        mkdir /var/www
+    fi
     mv /tmp/wordpress.$$/wordpress "/var/www/$1"
     rm -rf /tmp/wordpress.$$
     chown root:root -R "/var/www/$1"
@@ -506,7 +603,11 @@ function install_wordpress {
 server {
     server_name $1;
     root /var/www/$1;
-    include /etc/nginx/fastcgi_php;
+    include fastcgi_php;
+    include nocgi.conf;
+END
+    disallow $1
+    cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
     location / {
         index index.php;
         if (!-e \$request_filename) {
@@ -515,7 +616,7 @@ server {
     }
 }
 END
-    invoke-rc.d nginx reload
+    service nginx force-reload
 }
 
 function print_info {
@@ -545,6 +646,7 @@ function remove_unneeded {
     check_remove /usr/sbin/named bind9
     check_remove /usr/sbin/smbd 'samba*'
     check_remove /usr/sbin/nscd nscd
+    apt-get -q -y purge smbfs libwbclient0 libapr1 x11-common
 
     # Need to stop sendmail as removing the package does not seem to stop it.
     if [ -f /usr/lib/sm.bin/smtpd ]
@@ -557,7 +659,28 @@ function remove_unneeded {
 function update_upgrade {
     # Run through the apt-get update/upgrade first. This should be done before
     # we try to install any package
+
     apt-get -q -y update
+	check_install nano nano
+    nano setup-debian.conf
+    [ -r ./setup-debian.conf ] && . ./setup-debian.conf
+    if [ "$INTERFACE" = "all" -o "$INTERFACE" = "ipv6" ]; then
+        FLAGS=ipv6
+    else
+        FLAGS=ipv4
+    fi
+    if [ "$OPENVZ" = 'yes' ]; then
+        vzquota_fix
+        if [ -z "`grep 'ulimit -s 256' /etc/init.d/rc`" ];then
+           sed -i "s/export PATH/export PATH\\nulimit -s 256/" /etc/init.d/rc
+        fi
+        if [ ! -f /etc/security/limits.d/stack.conf ]; then
+            cat > /etc/security/limits.d/stack.conf <<END
+root            -       stack           256
+*               -       stack           256
+END
+        fi
+    fi
 	check_install locales locales
     dpkg-reconfigure locales
     apt-get -q -y upgrade
@@ -589,15 +712,142 @@ END
         print_info "/etc/rc6.d/S00vzreboot removed"
     fi
 }
+#                                      OPTIONAL
+
+#Custom commands go here, mine are included as examples delete as required
+function custom {
+    check_install keith rsync autossh lsof lua5.1 apticron
+    check_remove fancontrol fancontrol
+    check_remove dbus-daemon dbus
+    check_remove saslauthd sasl2-bin
+    if [ -n '`grep "# set softwrap" /etc/nanorc`' ];then
+        sed -i "s/# set softwrap/set softwrap/" /etc/nanorc
+        print_info "set softwrap in /etc/nanorc"
+    fi
+    if [ -n '`grep "# set tabsize 8" /etc/nanorc`' ];then
+        sed -i "s/# set tabsize 8/set tabsize 4/" /etc/nanorc
+        print_info "set tabsize 4 in /etc/nanorc"
+    fi
+    if [ -n "`grep '#   Port 22' /etc/ssh/ssh_config`" ];then
+        sed -i "s/#   Port 22/   Port $SSH_PORT/" /etc/ssh/ssh_config
+		print_info "default outgoing ssh port set to $SSH_PORT"
+    else
+        print_warn "/etc/ssh/ssh_config already changed"
+    fi
+    if [ -z "`grep 'MAILTO=' /etc/crontab`" ];then
+        sed -i "s/SHELL=\/bin\/sh/SHELL=\/bin\/sh\\nMAILTO=root/" /etc/crontab
+        print_info "MAILTO=root now in /etc/crontab"
+    fi
+    if [ -z "`grep 'dpkg --get-selections' /etc/crontab`" ];then
+	    echo "0 10 * * * root dpkg --get-selections >/root/dpkg-selections" >> /etc/crontab
+    fi
+    sed -i "s/rotate 52/rotate 1/" /etc/logrotate.d/nginx
+    sed -i "s/weekly/daily/" /etc/logrotate.conf
+    sed -i "s/rotate 4/rotate 1/" /etc/logrotate.conf
+    cat > /etc/nginx/sites-available/default <<END
+server {
+END
+    if [ "$INTERFACE" = "all" ]; then
+        cat >> /etc/nginx/sites-available/default <<END
+    listen   80; ## listen for ipv4
+    listen   [::]:80 default_server ipv6only=on; ## listen for ipv6
+END
+    else
+        if [ "$INTERFACE" = "ipv6" ]; then
+            cat >> /etc/nginx/sites-available/default <<END
+    listen   [::]:80; ## listen for ipv6
+END
+        else
+            cat >> /etc/nginx/sites-available/default <<END
+    listen   80 default_server; ## listen for ipv4
+END
+        fi
+    fi
+    cat >> /etc/nginx/sites-available/default <<END
+    server_name  _;
+    include nophp.conf;
+    include nocgi.conf;
+    include disallow.conf;
+    access_log  /var/log/nginx/default.log;
+    return 444;
+}
+END
+    chown www-data:adm /var/log/nginx/*.log
+    service nginx restart
+    cat > /usr/local/bin/bootmail.py <<END
+import datetime
+import smtplib
+def smtp():
+    host="`hostname -f`"
+    to = '$EMAIL'
+    mail_user = 'bootmail@%s' % (host)
+    smtpserver = smtplib.SMTP("127.0.0.1",25)
+    smtpserver.ehlo()
+    smtpserver.ehlo
+    header = 'To:' + to + '\\n' + 'From: ' + mail_user + '\\n' + 'Subject: %s has been booted' % (host)
+    print str(datetime.datetime.utcnow())[:19],host,"has been booted"
+    msg = header + '\\n\\n'
+    smtpserver.sendmail(mail_user, to, msg)
+    smtpserver.close()
+    return
+smtp()
+END
+    if [ -z "`grep 'python /usr/local/bin/bootmail.py' /etc/rc.local`" ]; then
+        sed -i "s/exit 0/\/usr\/bin\/python \/usr\/local\/bin\/bootmail.py\\nexit 0/" /etc/rc.local
+        print_info "bootmail.py inserted into /etc/rc.local"
+    else
+	    print_warn "bootmail.py already in /etc/rc.local"
+    fi
+}
 
 ########################################################################
 # START OF PROGRAM
 ########################################################################
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin
 
+if [ ! -f ./setup-debian.conf ]; then
+    cat > ./setup-debian.conf <<END
+SSH_PORT=1234 # Change 1234 to the port of your choice
+INTERFACE=all # Options are all for a dual stack ipv4/ipv6 server
+#                           ipv4 for an ipv4 server
+#                           ipv6 for an ipv6 server
+#               Defaults to ipv4 only if incorrect
+EMAIL=changeme@example.com # mail user or an external email address
+OPENVZ=yes # Change this to any other value than yes if not using OpenVZ
+END
+fi
 [ -r ./setup-debian.conf ] && . ./setup-debian.conf
 check_sanity
+if [ "$INTERFACE" = "all" -o "$INTERFACE" = "ipv6" ]; then
+    FLAGS=ipv6
+else
+    FLAGS=ipv4
+fi
 case "$1" in
+all)
+	remove_unneeded
+    dotdeb
+    update_upgrade
+    check_install tzdata tzdata
+    dpkg-reconfigure tzdata
+    install_dash
+    install_syslogd
+    install_dropbear
+    echo -n "To change root password press y then [ENTER]: "
+    read -e reply
+    if [ "$reply" = "y" ]; then
+        passwd
+    fi
+    install_postfix
+    install_mysql
+    install_nginx
+    install_php
+    install_cgi
+    install_iptables $SSH_PORT
+    ;;
+postfix)
+    install_postfix
+    ;;
 exim4)
     install_exim4
     ;;
@@ -616,11 +866,8 @@ php)
 cgi)
     install_cgi
     ;;
-cgi_domain)
-    install_cgi_domain $2
-    ;;
-vzquota)
-    vzquota_fix
+domain)
+    install_domain $2
     ;;
 system)
     remove_unneeded
@@ -631,15 +878,21 @@ system)
     install_dash
     install_syslogd
     install_dropbear
-    passwd
+    echo -n "To change root password press y then [ENTER]: "
+    read -e reply
+    if [ "$reply" = "y" ]; then
+        passwd
+    fi
+    ;;
+custom)
+    custom $2
     ;;
 wordpress)
     install_wordpress $2
     ;;
-*)
-    echo 'Usage:' `basename $0` '[option]'
+*)    echo 'Usage:' `basename $0` '[option]'
     echo 'Available option:'
-    for option in vzquota system exim4 iptables mysql nginx php cgi cgi_domain wordpress
+    for option in system postfix exim4 iptables mysql nginx php cgi domain wordpress custom
     do
         echo '  -' $option
     done
