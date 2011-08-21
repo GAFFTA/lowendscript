@@ -793,7 +793,7 @@ def smtp():
 smtp()
 END
     if [ -z "`grep 'python /usr/local/bin/bootmail.py' /etc/rc.local`" ]; then
-        sed -i "s/exit 0/\/usr\/bin\/python \/usr\/local\/bin\/bootmail.py\\nexit 0/" /etc/rc.local
+        sed -i "s/nothing./nothing.\\n\/usr\/bin\/python \/usr\/local\/bin\/bootmail.py/" /etc/rc.local
         print_info "bootmail.py inserted into /etc/rc.local"
     else
 	    print_warn "bootmail.py already in /etc/rc.local"
