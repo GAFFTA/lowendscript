@@ -7,7 +7,7 @@ function check_install {
         shift
         while [ -n "$1" ]
         do
-            DEBIAN_FRONTEND=noninteractive apt-get -q -y install "$1"
+            DEBIAN_FRONTEND=noninteractive apt-get --no-install-recommends -q -y install "$1"
             print_info "$1 installed for $executable"
             shift
         done
@@ -68,6 +68,9 @@ function disallow {
     if [ "$reply" = "y" ]; then
         cat >> "/etc/nginx/sites-enabled/$1.conf" <<END
     include disallow.conf;
+    location / {
+        include disallow-agent.conf;
+    }
 END
     fi
 }
@@ -91,7 +94,7 @@ deb http://packages.dotdeb.org stable all
 deb-src http://packages.dotdeb.org stable all
 END
         wget -O - http://www.dotdeb.org/dotdeb.gpg | apt-key add -
-		print_info "dotdeb now being used"
+		print_info "dotdeb repository now being used"
     fi
 }
 function install_dash {
@@ -204,22 +207,24 @@ server_names_hash_bucket_size 64;
 END
     cat > /etc/nginx/nophp.conf <<END
 location ~* \.php\$ {
-access_log /var/log/nginx/disallow.log;
-return 444;
+    access_log /var/log/nginx/disallow.log;
+    return 444;
 }
 END
     cat > /etc/nginx/nocgi.conf <<END
 location ~* \\.(pl|cgi|py|sh|lua)\$ {
-access_log /var/log/nginx/disallow.log;
-return 444;
+    access_log /var/log/nginx/disallow.log;
+    return 444;
 }
 END
     cat > /etc/nginx/disallow.conf <<END
+location ~* (roundcube|webdav|smtp|http\\:|soap|w00tw00t) {
+    access_log /var/log/nginx/disallow.log;
+    return 444;
+}
+END
+    cat > /etc/nginx/disallow-agent.conf <<END
 location / {
-    location ~* (roundcube|webdav|smtp|http\\:|soap|w00tw00t) {
-        access_log /var/log/nginx/disallow.log;
-        return 444;
-    }
     if (\$http_user_agent ~* "(Morfeus|larbin|ZmEu|Toata|Huawei|talktalk)" ) {
         access_log /var/log/nginx/disallow.log;
         return 444;
@@ -276,7 +281,7 @@ END
 function install_domain {
     if [ -z "$1" ]
     then
-        die "Usage: `basename $0` cgi_domain <hostname>"
+        die "Usage: `basename $0` domain <hostname>"
     fi
 
     if [ ! -d /var/www ]; then
@@ -661,16 +666,7 @@ function update_upgrade {
     # we try to install any package
 
     apt-get -q -y update
-	check_install nano nano
-    nano setup-debian.conf
-    [ -r ./setup-debian.conf ] && . ./setup-debian.conf
-    if [ "$INTERFACE" = "all" -o "$INTERFACE" = "ipv6" ]; then
-        FLAGS=ipv6
-    else
-        FLAGS=ipv4
-    fi
     if [ "$OPENVZ" = 'yes' ]; then
-        vzquota_fix
         if [ -z "`grep 'ulimit -s 256' /etc/init.d/rc`" ];then
            sed -i "s/export PATH/export PATH\\nulimit -s 256/" /etc/init.d/rc
         fi
@@ -749,7 +745,7 @@ server {
 END
     if [ "$INTERFACE" = "all" ]; then
         cat >> /etc/nginx/sites-available/default <<END
-    listen   80; ## listen for ipv4
+    listen   80 default_server; ## listen for ipv4
     listen   [::]:80 default_server ipv6only=on; ## listen for ipv6
 END
     else
@@ -765,9 +761,6 @@ END
     fi
     cat >> /etc/nginx/sites-available/default <<END
     server_name  _;
-    include nophp.conf;
-    include nocgi.conf;
-    include disallow.conf;
     access_log  /var/log/nginx/default.log;
     return 444;
 }
@@ -805,6 +798,7 @@ END
 ########################################################################
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin
 
+check_sanity
 if [ ! -f ./setup-debian.conf ]; then
     cat > ./setup-debian.conf <<END
 SSH_PORT=1234 # Change 1234 to the port of your choice
@@ -816,8 +810,15 @@ EMAIL=changeme@example.com # mail user or an external email address
 OPENVZ=yes # Change this to any other value than yes if not using OpenVZ
 END
 fi
+if [ "$OPENVZ" = 'yes' ]; then
+    vzquota_fix
+fi
+if [ -z "`which "$1" 2>/dev/null`" ]; then
+    apt-get -q -y update
+    check_install nano nano
+fi
+nano ./setup-debian.conf
 [ -r ./setup-debian.conf ] && . ./setup-debian.conf
-check_sanity
 if [ "$INTERFACE" = "all" -o "$INTERFACE" = "ipv6" ]; then
     FLAGS=ipv6
 else
